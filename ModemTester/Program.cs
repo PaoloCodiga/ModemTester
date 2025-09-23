@@ -1,84 +1,77 @@
-﻿using Serilog;
-using System.IO.Ports;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
+using Serilog;
+using Serilog.Events;
+using CallerIdListener.Services;
+using CallerIdListener.Utils;
 
-class Program
+namespace CallerIdListener;
+
+public class Program
 {
-   private static SerialPort? _serialPort;
-
-   static void Main()
+   // Entry point: build a Generic Host for DI, Logging, and lifetime handling.
+   public static async Task Main(string[] args)
    {
-      // Configure Serilog (console + file)
-      Log.Logger = new LoggerConfiguration()
-          .MinimumLevel
-         .Debug()
-         .WriteTo
-         .Console()
-         .WriteTo
-         .File("logs\\modem_log.txt", rollingInterval: RollingInterval.Day)
-         .CreateLogger();
+      var builder = Host.CreateDefaultBuilder(args)
+          .ConfigureAppConfiguration((ctx, cfg) =>
+          {
+             cfg.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+             cfg.AddEnvironmentVariables(prefix: "CALLERID_"); // optional env override
+             if (args is { Length: > 0 }) cfg.AddCommandLine(args);
+          })
+          .UseSerilog((ctx, services, serilogCfg) =>
+          {
+             // Read Serilog configuration from appsettings.json
+             serilogCfg
+                   .ReadFrom.Configuration(ctx.Configuration)
+                   .ReadFrom.Services(services);
+          })
+          .ConfigureServices((ctx, services) =>
+          {
+             // Options binding
+             services.Configure<ModemOptions>(ctx.Configuration.GetSection("Modem"));
+             services.Configure<LookupOptions>(ctx.Configuration.GetSection("Lookup"));
 
-      try
-      {
-         Log.Information("Starting modem listener...");
+             // HttpClientFactory for lookup service
+             services.AddHttpClient("SearchCh", client =>
+             {
+                // Base address can stay empty because API needs full URL.
+                client.Timeout = TimeSpan.FromSeconds(10);
+             });
 
-         // Adjust COM port based on your system
-         _serialPort = new SerialPort("COM3", 115200, Parity.None, 8, StopBits.One);
-         _serialPort.DataReceived += SerialPort_DataReceived;
-         _serialPort.Open();
+             // Utilities and services
+             services.AddSingleton<CallerIdParser>();
+             services.AddSingleton<ISearchLookup, SearchChLookup>(); // pluggable provider
+             services.AddHostedService<ModemListener>();             // BackgroundService
+          });
 
-         Log.Information("Serial port {PortName} opened successfully", _serialPort.PortName);
+      using var host = builder.Build();
 
-         // Reset and enable Caller ID
-         _serialPort.WriteLine("ATZ");
-         Log.Debug("Sent command: ATZ");
-
-         _serialPort.WriteLine("AT+VCID=1");
-         Log.Debug("Sent command: AT+VCID=1 (enable Caller ID)");
-
-         Console.WriteLine("Listening for calls... Press any key to exit.");
-         Console.ReadKey();
-      }
-      catch (Exception ex)
-      {
-         Log.Error(ex, "An error occurred while initializing modem listener");
-      }
-      finally
-      {
-         if (_serialPort != null && _serialPort.IsOpen)
-         {
-            _serialPort.Close();
-            Log.Information("Serial port closed.");
-         }
-
-         Log.CloseAndFlush();
-      }
+      Log.Information("Starting CallerIdListener...");
+      await host.RunAsync();
+      Log.Information("CallerIdListener stopped.");
    }
+}
 
-   private static void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
-   {
-      try
-      {
-         string? data = _serialPort?.ReadExisting();
-         Log.Debug("Raw data received: {Data}", data);
+// Strongly-typed options for modem config
+public sealed class ModemOptions
+{
+   public string ComPort { get; set; } = "COM3";
+   public int BaudRate { get; set; } = 115200;
+   public string Parity { get; set; } = "None";   // None, Odd, Even, Mark, Space
+   public int DataBits { get; set; } = 8;
+   public string StopBits { get; set; } = "One";  // None, One, Two, OnePointFive
+   public int ReadTimeoutMs { get; set; } = 500;
+   public int WriteTimeoutMs { get; set; } = 500;
+   public string[] InitCommands { get; set; } = ["ATZ", "AT+VCID=1"];
+}
 
-         if (data?.Contains("NMBR") == true)
-         {
-            var lines = data.Split('\n');
-            foreach (var line in lines)
-            {
-               if (line.Trim().StartsWith("NMBR"))
-               {
-                  string number = line.Split('=')[1].Trim();
-                  Log.Information("Incoming call detected from: {Number}", number);
-
-                  // TODO: forward number to POSsible (e.g., simulate keyboard input or API)
-               }
-            }
-         }
-      }
-      catch (Exception ex)
-      {
-         Log.Error(ex, "Error while processing serial data");
-      }
-   }
+public sealed class LookupOptions
+{
+   public bool Enable { get; set; } = true;
+   public string Provider { get; set; } = "SearchCh";
+   public string SearchChApiKey { get; set; } = "";
+   public string CountryCode { get; set; } = "CH";
 }
