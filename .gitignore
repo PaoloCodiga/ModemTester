@@ -1,7 +1,7 @@
 # local secrets
-#appsettings.Local.json
-#*.user
-#*.secret.json
+appsettings.Local.json
+*.user
+*.secret.json
 
 
 ## Ignore Visual Studio temporary files, build results, and
