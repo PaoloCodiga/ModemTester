@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "ModemTester": {
+      "commandName": "Project",
+      "commandLineArgs": ""
+    }
+  }
+}
